@@ -1,0 +1,99 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_build_tools:
+        description: 'Build tools'
+        required: false
+        type: boolean
+        default: false
+
+      enable_build_kernel:
+        description: 'Build kernel'
+        required: false
+        type: boolean
+        default: false
+
+  schedule:
+    - cron: "39 22 * * 6"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      - name: Set timezone
+
+        run: |
+          sudo timedatectl set-timezone Asia/Shanghai
+          date +"%Y-%m-%d %H:%M:%S %:z"
+                    
+      - name: Inspect runner
+        run: |
+          date +"%Y-%m-%d %H:%M:%S %:z"
+          lscpu | grep -E '^Architecture|^CPU\(s\):|^Model name'
+          uname -sr
+          lsb_release -a
+          free -h
+          df -Th
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup bot
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Build
+        uses: apoiston/actions@builder
+        with:
+          private_key: ${{ secrets.PRIVATE_KEY }}
+          public_key: ${{ secrets.PUBLIC_KEY }}
+          prepare_base: ${{ secrets.PREPARE_BASE }}
+          extend_config: ${{ secrets.EXTEND_CONFIG }}
+          export_dist: ${{ secrets.EXPORT_DIST }}
+          enable_build_tools: ${{ inputs.enable_build_tools == true && 'true' || 'false' }}
+          enable_build_kernel: ${{ inputs.enable_build_kernel == true && 'true' || 'false' }}
+
+      - name: Prepare
+        continue-on-error: true
+        run: |
+          rsync -a --quiet --include='*.buildinfo' --exclude='*' "$WORK_DIR/dist/" outputs/
+
+      - name: Commit
+        continue-on-error: true
+        run: |
+          git add outputs/
+          git commit -m "$(date +"%Y-%m-%d %H:%M:%S %:z") [SDK]"
+          git push origin main --force
+
+      - name: Create tag
+        id: create_tag
+        run: |
+          TAG="$(date '+%y.%m.%d')"
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            git push origin --delete "$TAG" || true
+          fi
+          git tag -d "$TAG" 2>/dev/null || true
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: OpenWrt SDK ${{ steps.create_tag.outputs.tag }}
+          tag_name: ${{ steps.create_tag.outputs.tag }}
+          body_path: ${{ env.WORK_DIR }}/CHANGELOG.md
+          files: |
+            ${{ env.WORK_DIR }}/dist/*.zst
+            ${{ env.WORK_DIR }}/dist/*.txt
+          make_latest: true
+          draft: false
+          prerelease: false
